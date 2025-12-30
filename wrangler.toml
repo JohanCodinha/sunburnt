@@ -1,0 +1,13 @@
+name = "reitit-cf-demo"
+main = "./out/main.js"
+compatibility_date = "2024-01-01"
+
+[assets]
+directory = "./public"
+
+[observability]
+enabled = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1  # 100% sampling for debugging, reduce in production

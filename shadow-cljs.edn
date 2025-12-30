@@ -1,0 +1,10 @@
+{:source-paths ["src/main"]
+ :dependencies [[metosin/reitit-core "0.7.2"]
+                [metosin/reitit-malli "0.7.2"]]
+ :builds
+ {:worker
+  {:target :esm
+   :output-dir "out"
+   :modules {:main {:exports {default worker.core/handler-obj}}}
+   :devtools {:enabled false}
+   :compiler-options {:optimizations :advanced}}}}
