@@ -44,9 +44,6 @@
   [_request]
   (ring/text-response "Not Found" 404))
 
-;; -----------------------------------------------------------------------------
-;; Router
-
 (def router
   (r/router
    [["/api/hello" {:name ::api-hello
@@ -57,15 +54,10 @@
                       :parameters {:query [:map [:q :string]]}}]]
    {:compile coercion/compile-request-coercers}))
 
-;; -----------------------------------------------------------------------------
-;; Request Handler
 
 (def ^:private handle-request
   "Main request handler - wraps router with Ring adapter."
   (ring/wrap-routes router not-found-handler))
-
-;; -----------------------------------------------------------------------------
-;; Cloudflare Worker Export
 
 (def handler-obj
   "Export object for Cloudflare Workers with fetch handler."

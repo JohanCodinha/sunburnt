@@ -12,3 +12,8 @@ enabled = true
 [observability.traces]
 enabled = true
 head_sampling_rate = 1  # 100% sampling for debugging, reduce in production
+
+[[d1_databases]]
+binding = "PLACES_DB"
+database_name = "places-db"
+database_id = "local"  # Placeholder for local development
