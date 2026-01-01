@@ -21,3 +21,4 @@ out/
 # Logs
 *.log
 data/
+scripts/.cpcache/

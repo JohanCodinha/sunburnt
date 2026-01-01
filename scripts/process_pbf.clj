@@ -1,21 +1,16 @@
-;; Process PBF directly to batched SQL (no intermediate files)
-;; Usage: clojure -Sdeps '{:deps {org.openstreetmap.osmosis/osmosis-pbf {:mvn/version "0.49.2"}}}' -M scripts/process_pbf.clj
-
 (ns process-pbf
-  (:require [clojure.java.io :as io]
-            [clojure.string :as str])
-  (:import [crosby.binary.osmosis OsmosisReader]
-           [org.openstreetmap.osmosis.core.task.v0_6 Sink]
-           [org.openstreetmap.osmosis.core.container.v0_6 NodeContainer]
-           [org.openstreetmap.osmosis.core.domain.v0_6 Node Tag]
-           [java.io File FileInputStream]))
+  (:require
+   [clojure.data.json :as json]
+   [clojure.edn :as edn]
+   [clojure.java.io :as io]
+   [clojure.java.shell :as sh]
+   [clojure.string :as str]
+   [honey.sql :as sql])
+  (:import
+   [com.linuxense.javadbf DBFReader]
+   [java.io FileInputStream]
+   [java.lang ProcessBuilder ProcessBuilder$Redirect]))
 
-(def data-dir "data")
-(def pbf-file (str data-dir "/australia.osm.pbf"))
-(def sql-file (str data-dir "/places.sql"))
-(def batch-size 1000)
-
-;; Importance scores
 (def importance
   {"city"           100
    "town"           80
@@ -35,61 +30,65 @@
    "locality"       10
    "neighbourhood"  15})
 
-;; State detection from coordinates
-(def state-bounds
-  {:WA        [112.9 129.0 -35.2 -13.7]
-   :NT        [129.0 138.0 -26.0 -10.9]
-   :SA        [129.0 141.0 -38.1 -26.0]
-   :QLD       [138.0 153.6 -29.2 -10.7]
-   :NSW       [141.0 153.6 -37.5 -28.2]
-   :VIC       [140.9 150.0 -39.2 -34.0]
-   :TAS       [143.8 148.5 -43.7 -39.6]
-   :ACT       [148.7 149.4 -35.9 -35.1]
-   :NORFOLK   [167.9 168.1 -29.1 -28.9]
-   :LORD-HOWE [159.0 159.2 -31.6 -31.5]
-   :CHRISTMAS [105.5 105.8 -10.6 -10.4]
-   :COCOS     [96.8  96.9  -12.2 -12.1]
-   :MACQUARIE [158.8 159.0 -54.8 -54.4]})
+;; osmium tags-filter expressions (filter which OSM objects to include)
+(def tag-filters
+  ["place=city" "place=town" "place=village" "place=suburb"
+   "place=hamlet" "place=locality" "place=neighbourhood"
+   "natural=peak" "natural=beach" "natural=water"
+   "leisure=park" "leisure=nature_reserve"
+   "boundary=national_park"
+   "tourism=attraction"
+   "landuse=winter_sports"])
 
-(defn in-bounds? [lon lat [min-lon max-lon min-lat max-lat]]
-  (and (>= lon min-lon) (<= lon max-lon)
-       (>= lat min-lat) (<= lat max-lat)))
+(def ^:const EARTH_RADIUS_KM 6371.0)
+(def ^:const DEG_TO_RAD (/ Math/PI 180.0))
 
-(defn detect-state [lon lat]
-  (cond
-    (in-bounds? lon lat (:ACT state-bounds)) "ACT"
-    (in-bounds? lon lat (:NORFOLK state-bounds)) "NORFOLK"
-    (in-bounds? lon lat (:LORD-HOWE state-bounds)) "LORD_HOWE"
-    (in-bounds? lon lat (:CHRISTMAS state-bounds)) "CHRISTMAS"
-    (in-bounds? lon lat (:COCOS state-bounds)) "COCOS"
-    (in-bounds? lon lat (:MACQUARIE state-bounds)) "MACQUARIE"
-    (in-bounds? lon lat (:TAS state-bounds)) "TAS"
-    (in-bounds? lon lat (:VIC state-bounds)) "VIC"
-    (in-bounds? lon lat (:NSW state-bounds)) "NSW"
-    (in-bounds? lon lat (:QLD state-bounds)) "QLD"
-    (in-bounds? lon lat (:SA state-bounds)) "SA"
-    (in-bounds? lon lat (:NT state-bounds)) "NT"
-    (in-bounds? lon lat (:WA state-bounds)) "WA"
-    :else nil))
+(defn equirectangular-distance
+  "Fast approximation for distance in km between two points.
+  Accurate to <0.5% error for distances up to ~100km.
+  Much faster than Haversine (~5-10x) for finding nearest locations."
+  [lat1 lon1 lat2 lon2]
+  (let [lat-avg-rad (* (/ (+ lat1 lat2) 2.0) DEG_TO_RAD)
+        x (* (- lon2 lon1) (Math/cos lat-avg-rad))
+        y (- lat2 lat1)
+        distance-deg (Math/sqrt (+ (* x x) (* y y)))]
+    (* EARTH_RADIUS_KM distance-deg DEG_TO_RAD)))
 
-(defn get-tags
-  "Extract tags as a map from OSM entity"
-  [entity]
-  (into {}
-        (map (fn [^Tag t] [(.getKey t) (.getValue t)])
-             (.getTags entity))))
+(defn dbf-row->location
+  "Convert a DBF row to a location map"
+  [row]
+  {:aac   (.getString row "AAC")
+   :name  (.getString row "PT_NAME")
+   :lat   (.getDouble row "LAT")
+   :lon   (.getDouble row "LON")
+   :state (.getString row "STATE_CODE")
+   :precis (.getInt row "PRECIS_FLG")})
+
+(defn find-nearest-bom-location
+  "Find the nearest BOM forecast location for given coordinates"
+  [bom-locations lat lon]
+  (reduce
+    (fn [best loc]
+      (let [dist (equirectangular-distance lat lon (:lat loc) (:lon loc))]
+        (if (or (nil? best) (< dist (:distance best)))
+          {:aac (:aac loc)
+           :state (:state loc)
+           :distance dist}
+          best)))
+    nil
+    bom-locations))
 
 (defn determine-type
   "Determine place type and subtype from OSM tags"
   [tags]
-  (let [place    (get tags "place")
-        natural  (get tags "natural")
-        leisure  (get tags "leisure")
-        boundary (get tags "boundary")
-        tourism  (get tags "tourism")
-        waterway (get tags "waterway")
-        landuse  (get tags "landuse")
-        water    (get tags "water")]
+  (let [place    (:place tags)
+        natural  (:natural tags)
+        leisure  (:leisure tags)
+        boundary (:boundary tags)
+        tourism  (:tourism tags)
+        waterway (:waterway tags)
+        landuse  (:landuse tags)
+        water    (:water tags)]
     (cond
       ;; Place tags
       (#{"city" "town" "village" "suburb" "hamlet" "locality" "neighbourhood"} place)
@@ -115,131 +114,178 @@
 
       :else nil)))
 
-(defn escape-sql [s]
-  (when s
-    (-> s
-        (str/replace "'" "''")
-        (str/replace "\n" " ")
-        (str/replace "\r" ""))))
+(defn polygon-centroid
+  "Simple centroid calculation for polygon coordinates"
+  [coords]
+  (let [n (count coords)]
+    (when (pos? n)
+      [(/ (reduce + (map first coords)) n)
+       (/ (reduce + (map second coords)) n)])))
 
-(defn place->sql-values
-  "Convert place map to SQL VALUES tuple string"
-  [{:keys [id name lat lon type subtype state osm-id importance]}]
-  (format "(%d,'%s',%f,%f,'%s',%s,%s,'%s',%d)"
-          id
-          (escape-sql name)
-          lat
-          lon
-          type
-          (if subtype (str "'" (escape-sql subtype) "'") "NULL")
-          (if state (str "'" state "'") "NULL")
-          osm-id
-          importance))
+(defn geometry->centroid
+  "Get centroid [lon lat] from geometry"
+  [{:keys [type coordinates]}]
+  (case type
+    "Point"        coordinates
+    "Polygon"      (polygon-centroid (first coordinates))
+    "MultiPolygon" (polygon-centroid (mapcat first coordinates))
+    nil))
 
-(defn write-batch!
-  "Write a batch of places as a single INSERT statement"
-  [^java.io.Writer writer places]
-  (when (seq places)
-    (.write writer "INSERT INTO places (id,name,lat,lon,type,subtype,state,osm_id,importance) VALUES\n")
-    (.write writer (str/join ",\n" (map place->sql-values places)))
-    (.write writer ";\n\n")))
+(defn parse-geojson-line
+  "Parse a GeoJSONSeq line (may have leading RS character)"
+  [line]
+  (some-> line
+          (str/replace-first "\u001e" "")
+          not-empty
+          (json/read-str :key-fn keyword)))
 
-(defn process-pbf! []
-  (println "Processing PBF directly to SQL...")
-  (println "Input:" pbf-file)
-  (println "Output:" sql-file)
-  (println "Batch size:" batch-size)
-  (println)
+(defn feature->place
+  "Convert GeoJSON feature to place map"
+  [{:keys [properties geometry id] :as feature}]
+  (when (and feature geometry)
+    (let [geom-type (:type geometry)
+          centroid  (geometry->centroid geometry)]
+      (when centroid
+        {:name      (:name properties)
+         :lon       (first centroid)
+         :lat       (second centroid)
+         :tags      (dissoc properties :name)
+         :osm-id    (or id "unknown")
+         :geom-type geom-type}))))
 
-  (when-not (.exists (io/file pbf-file))
-    (println "Error: PBF file not found:" pbf-file)
-    (System/exit 1))
+(defn xf-determine-type
+  "Add type based on tags"
+  [importance-map]
+  (comp
+    (map (fn [{:keys [tags] :as place}]
+           (when-let [{:keys [type subtype]} (determine-type tags)]
+             (assoc place
+                    :type type
+                    :subtype subtype
+                    :importance (get importance-map type 0)))))
+    (filter some?)))
 
-  (let [stats (atom {:nodes 0 :places 0 :by-type {} :by-state {}})
-        idx (atom 0)
-        batch (atom [])
-        writer (io/writer sql-file)]
+(defn xf-add-bom-location
+  "Find and add nearest BOM forecast location (includes state)"
+  [bom-locations]
+  (map (fn [{:keys [lat lon] :as place}]
+         (let [nearest (find-nearest-bom-location bom-locations lat lon)]
+           (assoc place
+                  :state (:state nearest)
+                  :bom-aac (:aac nearest)
+                  :bom-distance-km (:distance nearest))))))
 
-    ;; Write header
-    (.write writer "-- Australian Places Database\n")
-    (.write writer "-- Generated from OpenStreetMap data\n")
-    (.write writer "-- Attribution: Place data (c) OpenStreetMap contributors\n\n")
+(defn place->values-row
+  "Convert a place map to a values row for batch insert"
+  [{:keys [name lat lon type subtype state osm-id importance
+           bom-aac bom-distance-km]}]
+  [name type subtype state osm-id (or importance 0)
+   lat lon bom-aac bom-distance-km])
 
-    (println "Reading PBF file...")
+(defn batch->sql
+  "Build a single INSERT statement for a batch of places"
+  [places]
+  (first
+    (sql/format {:insert-into :places
+                 :columns [:name :type :subtype :state :osm_id :importance
+                           :lat :lon :bom_aac :bom_distance_km]
+                 :values (mapv place->values-row places)}
+                {:inline true})))
 
-    ;; Create sink to receive entities
-    (let [sink (reify Sink
-                 (initialize [_ _])
-                 (complete [_])
-                 (close [_])
-                 (process [_ container]
-                   (when (instance? NodeContainer container)
-                     (let [^Node node (.getEntity ^NodeContainer container)
-                           tags (get-tags node)
-                           name (get tags "name")]
+(def sql-header
+  "-- Australian Places Database with BOM Forecast Locations
+-- Generated from OpenStreetMap data
+-- BOM forecast locations pre-computed for each place
+-- Attribution: Place data (c) OpenStreetMap contributors
+--              Weather data (c) Bureau of Meteorology
 
-                       (swap! stats update :nodes inc)
+-- BOM forecast locations (for GPS -> nearest forecast queries)
+CREATE TABLE IF NOT EXISTS bom_locations (
+  aac TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
+  state TEXT NOT NULL
+);
 
-                       ;; Progress
-                       (when (zero? (mod (:nodes @stats) 1000000))
-                         (println (str "  Processed " (:nodes @stats) " nodes, "
-                                       (:places @stats) " places...")))
+CREATE INDEX IF NOT EXISTS idx_bom_state ON bom_locations(state);
 
-                       ;; Extract place if valid
-                       (when (and name (not (str/blank? name)))
-                         (when-let [{:keys [type subtype]} (determine-type tags)]
-                           (let [lon (.getLongitude node)
-                                 lat (.getLatitude node)
-                                 place {:id         @idx
-                                        :name       name
-                                        :lat        lat
-                                        :lon        lon
-                                        :type       type
-                                        :subtype    subtype
-                                        :state      (detect-state lon lat)
-                                        :osm-id     (str "node/" (.getId node))
-                                        :importance (get importance type 0)}]
+-- Places with pre-computed nearest BOM forecast location
+CREATE TABLE IF NOT EXISTS places (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  subtype TEXT,
+  state TEXT,
+  osm_id TEXT NOT NULL,
+  importance INTEGER DEFAULT 0,
 
-                             (swap! idx inc)
-                             (swap! stats update :places inc)
-                             (swap! stats update-in [:by-type type] (fnil inc 0))
-                             (when (:state place)
-                               (swap! stats update-in [:by-state (:state place)] (fnil inc 0)))
+  -- Place coordinates (POI location)
+  lat REAL NOT NULL,
+  lon REAL NOT NULL,
 
-                             ;; Add to batch
-                             (swap! batch conj place)
+  -- Reference to nearest BOM forecast location
+  bom_aac TEXT NOT NULL REFERENCES bom_locations(aac),
+  bom_distance_km REAL NOT NULL
+);
 
-                             ;; Write batch if full
-                             (when (>= (count @batch) batch-size)
-                               (write-batch! writer @batch)
-                               (reset! batch [])))))))))]
+-- Indexes for common queries
+CREATE INDEX IF NOT EXISTS idx_name ON places(name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_type ON places(type);
+CREATE INDEX IF NOT EXISTS idx_state ON places(state);
+CREATE INDEX IF NOT EXISTS idx_bom_aac ON places(bom_aac);
 
-      ;; Read PBF file
-      (let [reader (OsmosisReader. (File. pbf-file))]
-        (.setSink reader sink)
-        (.run reader)))
+")
 
-    ;; Write remaining batch
-    (write-batch! writer @batch)
-    (.close writer)
+(defn bom-location->sql
+  "Generate INSERT statement for a BOM location using HoneySQL"
+  [{:keys [aac name lat lon state]}]
+  (first
+    (sql/format {:insert-into :bom_locations
+                 :columns [:aac :name :lat :lon :state]
+                 :values [[aac name lat lon state]]}
+                {:inline true})))
 
-    ;; Print summary
-    (println)
-    (println "Processing complete!")
-    (println (str "Nodes processed: " (:nodes @stats)))
-    (println (str "Places extracted: " (:places @stats)))
-    (println)
-    (println "By type:")
-    (doseq [[type cnt] (sort-by val > (:by-type @stats))]
-      (println (str "  " type ": " cnt)))
-    (println)
-    (println "By state:")
-    (doseq [[state cnt] (sort-by val > (:by-state @stats))]
-      (println (str "  " state ": " cnt)))
+(def bom-dbf-row->location
+  "Transducer for transforming DBF rows into BOM location maps (precis=1 only)"
+  (comp (take-while some?)
+        (map dbf-row->location)
+        (filter #(= 1 (:precis %)))
+        (map #(dissoc % :precis))))
 
-    ;; Show SQL file size
-    (let [size (-> (io/file sql-file) .length (/ 1024 1024) int)]
-      (println)
-      (println (str "SQL file size: " size " MB")))))
+(defn geojson-line->places
+  "Transducer pipeline for processing GeoJSON features into places with BOM locations"
+  [bom-locations batch-size]
+  (comp (map parse-geojson-line)
+        (filter some?)
+        (keep feature->place)
+        (remove #(str/blank? (:name %)))
+        (xf-determine-type importance)
+        (xf-add-bom-location bom-locations)
+        (partition-all batch-size)))
 
-(process-pbf!)
+(defn process! [config]
+  (let [{:keys [pbf-file sql-file bom-dbf-file batch-size]} config
+        filtered-pbf (str/replace pbf-file #"\.osm\.pbf$" ".filtered.osm.pbf")
+        _ (apply sh/sh "osmium" "tags-filter" pbf-file (concat tag-filters ["-o" filtered-pbf "--overwrite"]))
+        process (-> (ProcessBuilder. ["osmium" "export" "-f" "geojsonseq" "-o" "-" filtered-pbf])
+                    (.redirectError ProcessBuilder$Redirect/INHERIT)
+                    (.start))]
+    (with-open [bom-reader (DBFReader. (FileInputStream. bom-dbf-file))
+                geojson-reader (io/reader (.getInputStream process))
+                writer (io/writer sql-file)]
+      (let [bom-locations (into [] bom-dbf-row->location (repeatedly #(.nextRow bom-reader)))]
+        (.write writer sql-header)
+        (run! #(.write writer (str (bom-location->sql %) ";\n"))
+              bom-locations)
+        (run! #(.write writer (str (batch->sql %) ";\n"))
+              (sequence (geojson-line->places bom-locations batch-size)
+                        (line-seq geojson-reader)))))
+    (let [exit-code (.waitFor process)]
+      (when-not (zero? exit-code)
+        (throw (ex-info "osmium export process failed"
+                        {:exit-code exit-code
+                         :command ["osmium" "export" "-f" "geojsonseq" "-o" "-" filtered-pbf]}))))))
+
+(when-let [config-file (first *command-line-args*)]
+  (process! (edn/read-string (slurp config-file))))

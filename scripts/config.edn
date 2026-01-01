@@ -1,0 +1,4 @@
+{:pbf-file "../data/australia.osm.pbf"
+ :sql-file "../data/places.sql"
+ :bom-dbf-file "../data/bom/IDM00013.dbf"
+ :batch-size 100}

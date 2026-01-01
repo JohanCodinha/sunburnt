@@ -216,6 +216,7 @@
 
    If the route has coercion configured, parameters are validated and coerced.
    Coerced parameters are available under :parameters key.
+   The :env key contains Cloudflare bindings (D1, KV, etc).
 
    Usage:
      (defn my-handler [{:keys [parameters]}]
@@ -229,12 +230,13 @@
         (.then (fn [request-map]
                  ;; Merge request into match for coerce! (it expects request fields at top level)
                  (let [match-with-request (merge match request-map)
-                       {:keys [ok error]} (coerce-request request-map match-with-request)]
+                       {:keys [ok error]} (coerce-request request-map match-with-request)
+                       ok-with-env (when ok (assoc ok :env (:env match)))]
                    (if error
                      (js/Promise.resolve
                       {:status 400
                        :body (format-coercion-error error)})
-                     (let [result (handler ok)]
+                     (let [result (handler ok-with-env)]
                        (if (instance? js/Promise result)
                          result
                          (js/Promise.resolve result)))))))
@@ -255,16 +257,17 @@
      (def handler (wrap-routes router))
 
      ;; In Cloudflare Worker export:
-     #js {:fetch (fn [req env ctx] (handler req))}"
+     #js {:fetch (fn [req env ctx] (handler req env))}"
   [router not-found-handler]
   (let [not-found (wrap-handler (or not-found-handler
                                     (constantly {:status 404
                                                  :body "Not Found"})))]
-    (fn [request]
+    (fn [request env]
       (let [url (js/URL. (.-url request))
             path (.-pathname url)
-            match (r/match-by-path router path)]
+            match (r/match-by-path router path)
+            match-with-env (when match (assoc match :env env))]
         (if match
           (let [handler (get-in match [:data :handler])]
-            ((wrap-handler handler) request match))
+            ((wrap-handler handler) request match-with-env))
           (not-found request nil))))))
