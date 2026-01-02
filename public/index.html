@@ -62,35 +62,133 @@
     #results {
       margin-top: 20px;
     }
-    .forecast-card {
+    .location-header {
+      background: linear-gradient(135deg, #2a5298 0%, #1e3c72 100%);
+      color: white;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 15px;
+    }
+    .location-header h2 {
+      font-size: 1.5em;
+      margin-bottom: 5px;
+    }
+    .location-header .state {
+      opacity: 0.8;
+      font-size: 0.9em;
+    }
+    .current-conditions {
       background: #f8f9fa;
       border-radius: 12px;
       padding: 20px;
       margin-bottom: 15px;
-      border-left: 4px solid #2a5298;
+      border-left: 4px solid #ff9800;
     }
-    .forecast-card h3 {
+    .current-conditions h3 {
       color: #333;
+      margin-bottom: 15px;
+      font-size: 1.1em;
+    }
+    .current-temps {
+      display: flex;
+      align-items: baseline;
+      gap: 15px;
+      margin-bottom: 15px;
+    }
+    .current-temps .temp-main {
+      font-size: 3em;
+      font-weight: 300;
+      color: #333;
+    }
+    .current-temps .feels-like {
+      color: #666;
+      font-size: 0.9em;
+    }
+    .current-details {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+    }
+    .current-details .detail {
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .current-details .detail-label {
+      font-size: 0.75em;
+      color: #888;
+      text-transform: uppercase;
+    }
+    .current-details .detail-value {
+      font-size: 1.1em;
+      color: #333;
+      font-weight: 500;
+    }
+    .forecast-section h3 {
+      color: #333;
+      margin-bottom: 15px;
+      font-size: 1.1em;
+    }
+    .forecast-card {
+      background: #f8f9fa;
+      border-radius: 12px;
+      padding: 15px;
       margin-bottom: 10px;
-      font-size: 1.2em;
+      border-left: 4px solid #2a5298;
+      display: flex;
+      align-items: center;
+      gap: 15px;
+    }
+    .forecast-card .day {
+      min-width: 80px;
+      font-weight: 600;
+      color: #333;
+    }
+    .forecast-card .icon {
+      font-size: 1.5em;
     }
     .forecast-card .conditions {
+      flex: 1;
       color: #555;
-      margin-bottom: 10px;
+      font-size: 0.9em;
     }
     .forecast-card .temps {
       display: flex;
-      gap: 20px;
+      gap: 10px;
       flex-wrap: wrap;
     }
     .forecast-card .temp {
       padding: 5px 12px;
       border-radius: 20px;
-      font-size: 0.9em;
+      font-size: 0.85em;
     }
     .temp.min { background: #e3f2fd; color: #1565c0; }
     .temp.max { background: #ffebee; color: #c62828; }
     .temp.rain { background: #e8f5e9; color: #2e7d32; }
+    .other-matches {
+      margin-top: 20px;
+      padding-top: 15px;
+      border-top: 1px solid #eee;
+    }
+    .other-matches h4 {
+      color: #888;
+      font-size: 0.9em;
+      margin-bottom: 10px;
+    }
+    .other-matches .match {
+      display: inline-block;
+      background: #f0f0f0;
+      padding: 4px 12px;
+      border-radius: 15px;
+      margin: 3px;
+      font-size: 0.85em;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .other-matches .match:hover {
+      background: #e0e0e0;
+    }
     .loading {
       text-align: center;
       color: #666;
@@ -169,6 +267,75 @@
       if (e.key === 'Enter') searchForecast();
     });
 
+    const iconMap = {
+      'sunny': '☀️', 'clear': '🌙', 'partly-cloudy': '⛅', 'cloudy': '☁️',
+      'hazy': '🌫️', 'light-rain': '🌦️', 'windy': '💨', 'fog': '🌫️',
+      'showers': '🌧️', 'rain': '🌧️', 'dusty': '💨', 'frost': '❄️',
+      'snow': '🌨️', 'storm': '⛈️', 'light-showers': '🌦️', 'heavy-showers': '🌧️',
+      'cyclone': '🌀'
+    };
+
+    function formatDay(dateStr) {
+      const date = new Date(dateStr);
+      const today = new Date();
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+
+      if (date.toDateString() === today.toDateString()) return 'Today';
+      if (date.toDateString() === tomorrow.toDateString()) return 'Tomorrow';
+      return date.toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric' });
+    }
+
+    function renderObservation(obs) {
+      if (!obs) return '';
+      return `
+        <div class="current-conditions">
+          <h3>Current Conditions${obs.station ? ' — ' + obs.station : ''}</h3>
+          <div class="current-temps">
+            <span class="temp-main">${obs.temp_c !== null ? obs.temp_c + '°' : '--'}</span>
+            ${obs.feels_like_c !== null ? '<span class="feels-like">Feels like ' + obs.feels_like_c + '°</span>' : ''}
+          </div>
+          <div class="current-details">
+            ${obs.humidity !== null ? '<div class="detail"><div class="detail-label">Humidity</div><div class="detail-value">' + obs.humidity + '%</div></div>' : ''}
+            ${obs.wind_speed_kmh !== null ? '<div class="detail"><div class="detail-label">Wind</div><div class="detail-value">' + (obs.wind_dir || '') + ' ' + obs.wind_speed_kmh + ' km/h</div></div>' : ''}
+            ${obs.gust_speed_kmh !== null ? '<div class="detail"><div class="detail-label">Gusts</div><div class="detail-value">' + obs.gust_speed_kmh + ' km/h</div></div>' : ''}
+            ${obs.rain_24hr_mm !== null ? '<div class="detail"><div class="detail-label">Rain (24h)</div><div class="detail-value">' + obs.rain_24hr_mm + ' mm</div></div>' : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderForecast(forecast) {
+      if (!forecast || !forecast.periods || forecast.periods.length === 0) return '';
+      return `
+        <div class="forecast-section">
+          <h3>7-Day Forecast</h3>
+          ${forecast.periods.map(p => `
+            <div class="forecast-card">
+              <div class="day">${formatDay(p.start_time)}</div>
+              <div class="icon">${iconMap[p.icon] || '🌡️'}</div>
+              <div class="conditions">${p.forecast || ''}</div>
+              <div class="temps">
+                ${p.min_temp !== null ? '<span class="temp min">' + p.min_temp + '°</span>' : ''}
+                ${p.max_temp !== null ? '<span class="temp max">' + p.max_temp + '°</span>' : ''}
+                ${p.rain_chance ? '<span class="temp rain">' + p.rain_chance + '</span>' : ''}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function renderOtherMatches(matches) {
+      if (!matches || matches.length === 0) return '';
+      return `
+        <div class="other-matches">
+          <h4>Other matches:</h4>
+          ${matches.map(m => `<span class="match" onclick="quickSearch('${m.name}')">${m.name}, ${m.state}</span>`).join('')}
+        </div>
+      `;
+    }
+
     async function searchForecast() {
       const query = searchInput.value.trim();
       if (!query) return;
@@ -182,20 +349,18 @@
 
         if (data.error) {
           resultsDiv.innerHTML = '<div class="error">' + data.error + '</div>';
-        } else if (data.results.length === 0) {
+        } else if (!data.place) {
           resultsDiv.innerHTML = '<div class="no-results">No locations found matching "' + query + '"</div>';
         } else {
-          resultsDiv.innerHTML = data.results.map(r => `
-            <div class="forecast-card">
-              <h3>${r.location}</h3>
-              <div class="conditions">${r.forecast}</div>
-              <div class="temps">
-                ${r.min_temp !== null ? '<span class="temp min">Min: ' + r.min_temp + '°C</span>' : ''}
-                ${r.max_temp !== null ? '<span class="temp max">Max: ' + r.max_temp + '°C</span>' : ''}
-                <span class="temp rain">Rain: ${r.rain_chance}</span>
-              </div>
+          resultsDiv.innerHTML = `
+            <div class="location-header">
+              <h2>${data.place.name}</h2>
+              <div class="state">${data.place.type ? data.place.type + ', ' : ''}${data.place.state}</div>
             </div>
-          `).join('');
+            ${renderObservation(data.observation)}
+            ${renderForecast(data.forecast)}
+            ${renderOtherMatches(data.other_matches)}
+          `;
         }
       } catch (error) {
         resultsDiv.innerHTML = '<div class="error">Error: ' + error.message + '</div>';

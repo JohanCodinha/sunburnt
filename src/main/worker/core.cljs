@@ -30,12 +30,14 @@
 
 (defn- search-places
   "Search for places matching query in D1 database.
-   Returns top matches ordered by importance."
+   Returns top matches ordered by importance, including observation station info."
   [db query]
-  (-> (.prepare db "SELECT name, type, state, lat, lon, bom_aac, importance
-                    FROM places
-                    WHERE name LIKE ?
-                    ORDER BY importance DESC, name ASC
+  (-> (.prepare db "SELECT p.name, p.type, p.state, p.lat, p.lon, p.bom_aac, p.importance,
+                           b.obs_wmo, b.obs_name
+                    FROM places p
+                    LEFT JOIN bom_locations b ON p.bom_aac = b.aac
+                    WHERE p.name LIKE ?
+                    ORDER BY p.importance DESC, p.name ASC
                     LIMIT 10")
       (.bind (str "%" query "%"))
       (.all)
@@ -45,26 +47,35 @@
 (defn- forecast-handler
   "Returns forecast data for matching locations.
    Query param 'q' is validated by Malli coercion.
-   Uses D1 database to find matching places and their BOM forecast locations."
+   Uses D1 database to find matching places and their BOM forecast locations.
+   Fetches both forecast and live observation data in parallel."
   [{:keys [parameters env]}]
   (let [{:keys [q]} (:query parameters)
         db (.-PLACES_DB env)]
     (-> (search-places db q)
         (.then (fn [places]
                  (if (seq places)
-                   (let [best-match (first places)]
-                     (-> (bom/fetch-forecast-by-aac (:state best-match) (:bom_aac best-match))
-                         (.then (fn [forecast]
-                                  (ring/json-response
-                                   {:query q
-                                    :place {:name (:name best-match)
-                                            :type (:type best-match)
-                                            :state (:state best-match)
-                                            :lat (:lat best-match)
-                                            :lon (:lon best-match)}
-                                    :forecast forecast
-                                    :other_matches (mapv #(select-keys % [:name :type :state])
-                                                         (rest places))})))))
+                   (let [best-match (first places)
+                         state (:state best-match)
+                         ;; Fetch forecast and observation in parallel
+                         forecast-promise (bom/fetch-forecast-by-aac state (:bom_aac best-match))
+                         obs-promise (if-let [wmo (:obs_wmo best-match)]
+                                       (bom/fetch-observation-by-wmo state wmo)
+                                       (js/Promise.resolve nil))]
+                     (-> (js/Promise.all #js [forecast-promise obs-promise])
+                         (.then (fn [results]
+                                  (let [[forecast observation] (js->clj results :keywordize-keys true)]
+                                    (ring/json-response
+                                     {:query q
+                                      :place {:name (:name best-match)
+                                              :type (:type best-match)
+                                              :state (:state best-match)
+                                              :lat (:lat best-match)
+                                              :lon (:lon best-match)}
+                                      :observation observation
+                                      :forecast forecast
+                                      :other_matches (mapv #(select-keys % [:name :type :state])
+                                                           (rest places))}))))))
                    (ring/json-response {:query q
                                         :error "No matching places found"
                                         :places []})))))))

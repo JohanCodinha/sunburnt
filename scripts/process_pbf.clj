@@ -8,8 +8,11 @@
    [honey.sql :as sql])
   (:import
    [com.linuxense.javadbf DBFReader]
-   [java.io FileInputStream]
-   [java.lang ProcessBuilder ProcessBuilder$Redirect]))
+   [java.lang ProcessBuilder ProcessBuilder$Redirect]
+   [javax.xml.parsers SAXParserFactory]
+   [org.apache.commons.net.ftp FTPClient FTPReply]
+   [org.xml.sax Attributes]
+   [org.xml.sax.helpers DefaultHandler]))
 
 (def importance
   {"city"           100
@@ -43,6 +46,129 @@
 (def ^:const EARTH_RADIUS_KM 6371.0)
 (def ^:const DEG_TO_RAD (/ Math/PI 180.0))
 
+;; BOM observation feed URLs by state
+(def observation-feeds
+  {"VIC" "http://reg.bom.gov.au/fwo/IDV60920.xml"
+   "NSW" "http://reg.bom.gov.au/fwo/IDN60920.xml"
+   "ACT" "http://reg.bom.gov.au/fwo/IDN60920.xml"
+   "QLD" "http://reg.bom.gov.au/fwo/IDQ60920.xml"
+   "SA"  "http://reg.bom.gov.au/fwo/IDS60920.xml"
+   "WA"  "http://reg.bom.gov.au/fwo/IDW60920.xml"
+   "TAS" "http://reg.bom.gov.au/fwo/IDT60920.xml"
+   "NT"  "http://reg.bom.gov.au/fwo/IDD60920.xml"})
+
+(defn parse-geofabrik-state
+  "Pure function to parse Geofabrik state.txt content.
+  Returns {:sequence int :timestamp string} or nil if parsing fails."
+  [content]
+  (when content
+    (let [lines (str/split-lines content)
+          props (into {}
+                      (for [line lines
+                            :when (str/includes? line "=")
+                            :let [[k v] (str/split line #"=" 2)]]
+                        [(keyword k) v]))]
+      {:sequence (some-> (:sequenceNumber props) parse-long)
+       :timestamp (:timestamp props)})))
+
+(defn epoch-millis->rfc1123
+  "Pure function to convert epoch milliseconds to RFC 1123 date-time string."
+  [millis]
+  (-> (java.time.Instant/ofEpochMilli millis)
+      (.atZone java.time.ZoneOffset/UTC)
+      (.format java.time.format.DateTimeFormatter/RFC_1123_DATE_TIME)))
+
+(defn epoch-millis->iso8601
+  "Pure function to convert epoch milliseconds to ISO-8601 string."
+  [millis]
+  (-> (java.time.Instant/ofEpochMilli millis)
+      (.atZone java.time.ZoneOffset/UTC)
+      (.format java.time.format.DateTimeFormatter/ISO_INSTANT)))
+
+(defn get-ftp-last-modified
+  "Get last modified time of an FTP file using MDTM command.
+   Returns RFC 1123 date string or nil if unavailable.
+   Uses Apache Commons Net FTPClient which properly supports MDTM,
+   unlike Java's built-in FtpURLConnection which returns 0."
+  [url-str]
+  (let [url (java.net.URL. url-str)
+        host (.getHost url)
+        port (let [p (.getPort url)] (if (pos? p) p 21))
+        path (.getPath url)
+        client (FTPClient.)]
+    (try
+      (.connect client host port)
+      (when-not (FTPReply/isPositiveCompletion (.getReplyCode client))
+        (throw (ex-info "FTP connection refused" {:host host})))
+      (when-not (.login client "anonymous" "anonymous@example.com")
+        (throw (ex-info "FTP login failed" {:host host})))
+      (when-let [mtime (.getModificationTime client path)]
+        ;; Parse MDTM response (format: YYYYMMDDhhmmss)
+        (let [formatter (java.time.format.DateTimeFormatter/ofPattern "yyyyMMddHHmmss")
+              parsed (java.time.LocalDateTime/parse mtime formatter)
+              instant (.toInstant parsed java.time.ZoneOffset/UTC)]
+          (epoch-millis->rfc1123 (.toEpochMilli instant))))
+      (catch Exception e
+        (println "Warning: Failed to get FTP last-modified:" (.getMessage e))
+        nil)
+      (finally
+        (when (.isConnected client)
+          (try (.logout client) (catch Exception _))
+          (.disconnect client))))))
+
+(defn parse-d1-metadata
+  "Pure function to parse D1 wrangler JSON output.
+  Returns map of {source-name metadata-map} or nil if json-output is nil."
+  [json-output]
+  (when json-output
+    ;; wrangler returns [{:results [...], :success true, ...}]
+    (-> (json/read-str json-output :key-fn keyword)
+        first
+        :results
+        (->> (map (juxt :source identity))
+             (into {})))))
+
+(defn check-for-updates
+  "Pure check to determine if any data sources have changed.
+  Caller is responsible for fetching data and passing it in.
+  Args: {:current-meta map
+     :osm-state    {:sequence int :timestamp string}|nil
+     :bom-last-mod string|nil
+     :pbf-last-mod string|nil}
+  Returns {:changed? bool
+       :details  {:osm {:current int :stored int :changed? bool}
+          :bom-dbf {:current string|nil :stored string|nil :changed? bool}}
+       :sources  {:osm {:sequence int :timestamp string :pbf-modified string|nil}
+          :bom-dbf {:last-modified string|nil}}}"
+  [{:keys [current-meta osm-state bom-last-mod pbf-last-mod]}]
+  (let [stored-osm-seq (some-> (get current-meta "osm") :sequence_number)
+    stored-bom-mod (some-> (get current-meta "bom-dbf") :last_modified)
+    osm-seq (:sequence osm-state)
+    osm-changed? (or (nil? current-meta)
+         (nil? (get current-meta "osm"))
+         (not= osm-seq stored-osm-seq))
+    bom-changed? (or (nil? current-meta)
+         (nil? (get current-meta "bom-dbf"))
+         (not= bom-last-mod stored-bom-mod))]
+    {:changed? (or osm-changed? bom-changed?)
+     :details {:osm {:current osm-seq
+                     :stored stored-osm-seq
+                     :changed? osm-changed?}
+               :bom-dbf {:current bom-last-mod
+                         :stored stored-bom-mod
+                         :changed? bom-changed?}}
+     :sources {:osm {:sequence osm-seq
+                     :timestamp (:timestamp osm-state)
+                     :pbf-modified pbf-last-mod}
+               :bom-dbf {:last-modified bom-last-mod}}}))
+
+(defn now-iso8601
+  "Get current time as ISO-8601 string with milliseconds."
+  []
+  (-> (java.time.Instant/now)
+      (.atZone java.time.ZoneOffset/UTC)
+      (.format (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"))))
+
 (defn equirectangular-distance
   "Fast approximation for distance in km between two points.
   Accurate to <0.5% error for distances up to ~100km.
@@ -53,6 +179,41 @@
         y (- lat2 lat1)
         distance-deg (Math/sqrt (+ (* x x) (* y y)))]
     (* EARTH_RADIUS_KM distance-deg DEG_TO_RAD)))
+
+(defn parse-observation-stations
+  "Parse BOM observation XML from an InputStream to extract station metadata.
+   Returns a vector of {:wmo-id :name :lat :lon}"
+  [input-stream]
+  (let [stations (atom [])
+        handler (proxy [DefaultHandler] []
+                  (startElement [uri local-name qname ^Attributes attrs]
+                    (when (= qname "station")
+                      (let [wmo-id (.getValue attrs "wmo-id")
+                            name   (.getValue attrs "stn-name")
+                            lat    (.getValue attrs "lat")
+                            lon    (.getValue attrs "lon")]
+                        (when (and wmo-id lat lon)
+                          (swap! stations conj
+                                 {:wmo-id wmo-id
+                                  :name   name
+                                  :lat    (Double/parseDouble lat)
+                                  :lon    (Double/parseDouble lon)}))))))]
+        (doto (.newSAXParser (SAXParserFactory/newInstance))
+          (.parse input-stream handler))
+    @stations))
+
+(defn find-nearest-observation-station
+  "Find the nearest observation station for given coordinates from a list of stations."
+  [stations lat lon]
+  (when (seq stations)
+    (reduce
+      (fn [best station]
+        (let [dist (equirectangular-distance lat lon (:lat station) (:lon station))]
+          (if (or (nil? best) (< dist (:distance best)))
+            (assoc station :distance dist)
+            best)))
+      nil
+      stations)))
 
 (defn dbf-row->location
   "Convert a DBF row to a location map"
@@ -192,58 +353,13 @@
                  :values (mapv place->values-row places)}
                 {:inline true})))
 
-(def sql-header
-  "-- Australian Places Database with BOM Forecast Locations
--- Generated from OpenStreetMap data
--- BOM forecast locations pre-computed for each place
--- Attribution: Place data (c) OpenStreetMap contributors
---              Weather data (c) Bureau of Meteorology
-
--- BOM forecast locations (for GPS -> nearest forecast queries)
-CREATE TABLE IF NOT EXISTS bom_locations (
-  aac TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  lat REAL NOT NULL,
-  lon REAL NOT NULL,
-  state TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_bom_state ON bom_locations(state);
-
--- Places with pre-computed nearest BOM forecast location
-CREATE TABLE IF NOT EXISTS places (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL,
-  type TEXT NOT NULL,
-  subtype TEXT,
-  state TEXT,
-  osm_id TEXT NOT NULL,
-  importance INTEGER DEFAULT 0,
-
-  -- Place coordinates (POI location)
-  lat REAL NOT NULL,
-  lon REAL NOT NULL,
-
-  -- Reference to nearest BOM forecast location
-  bom_aac TEXT NOT NULL REFERENCES bom_locations(aac),
-  bom_distance_km REAL NOT NULL
-);
-
--- Indexes for common queries
-CREATE INDEX IF NOT EXISTS idx_name ON places(name COLLATE NOCASE);
-CREATE INDEX IF NOT EXISTS idx_type ON places(type);
-CREATE INDEX IF NOT EXISTS idx_state ON places(state);
-CREATE INDEX IF NOT EXISTS idx_bom_aac ON places(bom_aac);
-
-")
-
 (defn bom-location->sql
   "Generate INSERT statement for a BOM location using HoneySQL"
-  [{:keys [aac name lat lon state]}]
+  [{:keys [aac name lat lon state obs-wmo obs-name obs-distance-km]}]
   (first
     (sql/format {:insert-into :bom_locations
-                 :columns [:aac :name :lat :lon :state]
-                 :values [[aac name lat lon state]]}
+                 :columns [:aac :name :lat :lon :state :obs_wmo :obs_name :obs_distance_km]
+                 :values [[aac name lat lon state obs-wmo obs-name obs-distance-km]]}
                 {:inline true})))
 
 (def bom-dbf-row->location
@@ -264,28 +380,159 @@ CREATE INDEX IF NOT EXISTS idx_bom_aac ON places(bom_aac);
         (xf-add-bom-location bom-locations)
         (partition-all batch-size)))
 
-(defn process! [config]
-  (let [{:keys [pbf-file sql-file bom-dbf-file batch-size]} config
-        filtered-pbf (str/replace pbf-file #"\.osm\.pbf$" ".filtered.osm.pbf")
-        _ (apply sh/sh "osmium" "tags-filter" pbf-file (concat tag-filters ["-o" filtered-pbf "--overwrite"]))
-        process (-> (ProcessBuilder. ["osmium" "export" "-f" "geojsonseq" "-o" "-" filtered-pbf])
-                    (.redirectError ProcessBuilder$Redirect/INHERIT)
-                    (.start))]
-    (with-open [bom-reader (DBFReader. (FileInputStream. bom-dbf-file))
-                geojson-reader (io/reader (.getInputStream process))
-                writer (io/writer sql-file)]
-      (let [bom-locations (into [] bom-dbf-row->location (repeatedly #(.nextRow bom-reader)))]
-        (.write writer sql-header)
-        (run! #(.write writer (str (bom-location->sql %) ";\n"))
-              bom-locations)
-        (run! #(.write writer (str (batch->sql %) ";\n"))
-              (sequence (geojson-line->places bom-locations batch-size)
-                        (line-seq geojson-reader)))))
-    (let [exit-code (.waitFor process)]
-      (when-not (zero? exit-code)
-        (throw (ex-info "osmium export process failed"
-                        {:exit-code exit-code
-                         :command ["osmium" "export" "-f" "geojsonseq" "-o" "-" filtered-pbf]}))))))
+(defn add-nearest-observation-station
+  "Add nearest observation station to a BOM location."
+  [obs-stations {:keys [lat lon] :as bom-loc}]
+  (let [nearest (find-nearest-observation-station obs-stations lat lon)]
+    (if nearest
+      (assoc bom-loc
+             :obs-wmo (:wmo-id nearest)
+             :obs-name (:name nearest)
+             :obs-distance-km (:distance nearest))
+      bom-loc)))
+
+(defn metadata->sql
+  "Generate SQL INSERT statements for data source metadata."
+  [sources refreshed-at]
+  (let [{:keys [osm bom-dbf]} sources]
+    (str
+     ;; OSM metadata
+     (first (sql/format
+             {:insert-into :data_sources
+              :values [{:source "osm"
+                        :last_modified (:pbf-modified osm)
+                        :sequence_number (:sequence osm)
+                        :refreshed_at refreshed-at}]
+              :on-conflict [:source]
+              :do-update-set [:last_modified :sequence_number :refreshed_at]}
+             {:inline true}))
+     ";\n"
+     ;; BOM DBF metadata
+     (first (sql/format
+             {:insert-into :data_sources
+              :values [{:source "bom-dbf"
+                        :last_modified (:last-modified bom-dbf)
+                        :sequence_number nil
+                        :refreshed_at refreshed-at}]
+              :on-conflict [:source]
+              :do-update-set [:last_modified :refreshed_at]}
+             {:inline true}))
+     ";\n")))
+
+(defn build-d1-query-command
+  "Build wrangler d1 execute command for querying data sources.
+  Returns command vector suitable for sh/sh."
+  [local?]
+  (concat ["wrangler" "d1" "execute" "places-db"]
+          (if local? ["--local"] ["--remote"])
+          ["--json" "--command" "SELECT * FROM data_sources"]))
+
+(defn build-osmium-filter-command
+  "Build osmium tags-filter command.
+  Returns command vector suitable for sh/sh."
+  [pbf-file filtered-pbf]
+  (concat ["osmium" "tags-filter" pbf-file]
+          tag-filters
+          ["-o" filtered-pbf "--overwrite"]))
+
+(defn build-osmium-export-command
+  "Build osmium export command for ProcessBuilder"
+  [filtered-pbf]
+  ["osmium" "export" "-f" "geojsonseq" "-o" "-" filtered-pbf])
+
+(defn sh!
+  "Execute shell command and return :out on success.
+  Throws ex-info if exit code is non-zero.
+  Takes a command as a sequence of strings."
+  [cmd]
+  (let [result (apply sh/sh cmd)]
+    (if (zero? (:exit result))
+      (:out result)
+      (throw (ex-info "Shell command failed"
+                      {:command cmd
+                       :exit-code (:exit result)
+                       :stderr (:err result)})))))
+
+(defn sh-silent
+  "Execute shell command and return :out on success, nil on failure.
+  Use for queries where failure is acceptable (e.g., table doesn't exist yet)."
+  [cmd]
+  (let [result (apply sh/sh cmd)]
+    (when (zero? (:exit result))
+      (:out result))))
+
+(defn process! [{:keys [pbf-file pbf-url sql-file bom-dbf-url batch-size force? local? osm-state-url] :as config}]
+  (let [file (io/file pbf-file)]
+    (when-not (.exists file)
+      (io/make-parents file)
+      (let [conn (.openConnection (java.net.URL. pbf-url))]
+        (with-open [in (.getInputStream conn)
+                    out (io/output-stream file)]
+          (io/copy in out)))))
+  (let [;; Query D1 database (may be empty/missing on first run)
+        current-meta (-> (build-d1-query-command local?)
+                         sh-silent
+                         parse-d1-metadata)
+        ;; Fetch and parse Geofabrik state 
+        osm-state (-> osm-state-url slurp parse-geofabrik-state)
+        ;; Get BOM DBF last-modified from FTP 
+        bom-last-mod (get-ftp-last-modified bom-dbf-url)
+        ;; Get local PBF file modified time
+        pbf-last-mod (let [file (io/file pbf-file)]
+                       (when (.exists file)
+                         (epoch-millis->iso8601 (.lastModified file))))
+        update-result (check-for-updates {:current-meta current-meta
+                                          :osm-state osm-state
+                                          :bom-last-mod bom-last-mod
+                                          :pbf-last-mod pbf-last-mod})]
+    (println "Checking for data source updates...")
+    (println "  OSM sequence:" (get-in update-result [:details :osm :current])
+             "(stored:" (get-in update-result [:details :osm :stored]) ")"
+             (if (get-in update-result [:details :osm :changed?]) "[CHANGED]" "[unchanged]"))
+    (println "  BOM DBF last-modified:" (get-in update-result [:details :bom-dbf :current])
+             "(stored:" (get-in update-result [:details :bom-dbf :stored]) ")"
+             (if (get-in update-result [:details :bom-dbf :changed?]) "[CHANGED]" "[unchanged]"))
+    (when (or force? (:changed? update-result))
+      ;; Proceed with processing
+      (let [refreshed-at (now-iso8601)
+            sources (:sources update-result)
+            filtered-pbf (str/replace pbf-file #"\.osm\.pbf$" ".filtered.osm.pbf")
+            _ (sh! (build-osmium-filter-command pbf-file filtered-pbf))
+            osmium-geojsonseq-export-process (-> (ProcessBuilder. (build-osmium-export-command filtered-pbf))
+                                                 (.redirectError ProcessBuilder$Redirect/INHERIT)
+                                                 (.start))
+            _ (println "Fetching BOM observation stations...")
+            obs-stations (->> (vals observation-feeds)
+                              (map #(future
+                                      (with-open [stream (.openStream (java.net.URL. %))]
+                                        (parse-observation-stations stream))))
+                              doall
+                              (mapcat deref)
+                              (into []))]
+        (println "Streaming BOM forecast locations from" bom-dbf-url "...")
+        (with-open [bom-stream (.openStream (java.net.URL. bom-dbf-url))
+                    bom-reader (DBFReader. bom-stream)
+                    geojson-reader (io/reader (.getInputStream osmium-geojsonseq-export-process))
+                    writer (io/writer sql-file)]
+          (let [bom-locations-raw (into [] bom-dbf-row->location (repeatedly #(.nextRow bom-reader)))
+                _ (println "Computing nearest observation station for" (count bom-locations-raw) "BOM locations...")
+                bom-locations (mapv (partial add-nearest-observation-station obs-stations)
+                                    bom-locations-raw)]
+            (.write writer (slurp "scripts/schema.sql"))
+            (.write writer (metadata->sql sources refreshed-at))
+            (run! #(.write writer (str (bom-location->sql %) ";\n"))
+                  bom-locations)
+            (println "Processing OSM places...")
+            (run! #(.write writer (str (batch->sql %) ";\n"))
+                  (sequence (geojson-line->places bom-locations batch-size)
+                            (line-seq geojson-reader)))))
+        (let [exit-code (.waitFor osmium-geojsonseq-export-process)]
+          (when-not (zero? exit-code)
+            (throw (ex-info "osmium export process failed"
+                            {:exit-code exit-code
+                             :command ["osmium" "export" "-f" "geojsonseq" "-o" "-" filtered-pbf]}))))
+        (println "\nDone! SQL written to" sql-file)
+        (println "Refreshed at:" refreshed-at)))))
 
 (when-let [config-file (first *command-line-args*)]
   (process! (edn/read-string (slurp config-file))))

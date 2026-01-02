@@ -14,7 +14,7 @@
    "IDT16000"   ; Tasmania
    "IDD10207"]) ; Northern Territory
 
-;; State code to feed ID mapping
+;; State code to feed ID mapping (forecasts)
 (def state->feed-id
   {"VIC" "IDV10753"
    "NSW" "IDN11060"
@@ -24,6 +24,17 @@
    "WA"  "IDW14199"
    "TAS" "IDT16000"
    "NT"  "IDD10207"})
+
+;; State code to observation feed ID mapping
+(def state->obs-feed-id
+  {"VIC" "IDV60920"
+   "NSW" "IDN60920"
+   "ACT" "IDN60920"  ; ACT uses NSW feed
+   "QLD" "IDQ60920"
+   "SA"  "IDS60920"
+   "WA"  "IDW60920"
+   "TAS" "IDT60920"
+   "NT"  "IDD60920"})
 
 ;; BOM forecast icon code to name mapping
 ;; Source: https://reg.bom.gov.au/info/forecast_icons.shtml
@@ -383,6 +394,151 @@
         (.then (fn [response]
                  (if (.-ok response)
                    (-> (stream-parse-xml-by-aac response aac)
+                       (.then (fn [data] (:result data))))
+                   (js/Promise.resolve nil))))
+        (.catch (fn [_] (js/Promise.resolve nil))))
+    (js/Promise.resolve nil)))
+
+;; -----------------------------------------------------------------------------
+;; Live observation fetching
+
+(defn- create-obs-sax-parser
+  "Create a SAX parser that extracts observation for a specific WMO ID.
+   Returns {:parser parser :get-result fn :get-errors fn :is-done fn}."
+  [target-wmo]
+  (let [parser (saxes/SaxesParser.)
+        result (atom nil)
+        errors #js []
+        state #js {"inStation" false
+                   "stationName" nil
+                   "inLevel" false
+                   "currentElement" nil
+                   "obsTime" nil
+                   "temp" nil
+                   "apparentTemp" nil
+                   "humidity" nil
+                   "windDir" nil
+                   "windSpeed" nil
+                   "gustSpeed" nil
+                   "rainHour" nil
+                   "rain24hr" nil
+                   "cloud" nil
+                   "done" false}]
+
+    (set! (.-errorHandler parser)
+          (fn [err]
+            (.push errors (str err))))
+
+    (set! (.-openTagHandler parser)
+          (fn [tag]
+            (when-not (aget state "done")
+              (let [tag-name (.-name tag)
+                    attrs (.-attributes tag)]
+                (cond
+                  (= tag-name "station")
+                  (when (= (aget attrs "wmo-id") target-wmo)
+                    (aset state "inStation" true)
+                    (aset state "stationName" (aget attrs "stn-name")))
+
+                  (and (= tag-name "period") (aget state "inStation"))
+                  (aset state "obsTime" (aget attrs "time-local"))
+
+                  (and (= tag-name "level") (aget state "inStation"))
+                  (aset state "inLevel" true)
+
+                  (and (= tag-name "element") (aget state "inLevel"))
+                  (aset state "currentElement" (aget attrs "type")))))))
+
+    (set! (.-textHandler parser)
+          (fn [text]
+            (when-not (aget state "done")
+              (when-let [elem-type (aget state "currentElement")]
+                (let [text-val (str/trim text)]
+                  (when (seq text-val)
+                    (case elem-type
+                      "air_temperature" (aset state "temp" (js/parseFloat text-val))
+                      "apparent_temp" (aset state "apparentTemp" (js/parseFloat text-val))
+                      "rel-humidity" (aset state "humidity" (js/parseInt text-val 10))
+                      "wind_dir" (aset state "windDir" text-val)
+                      "wind_spd_kmh" (aset state "windSpeed" (js/parseInt text-val 10))
+                      "gust_kmh" (aset state "gustSpeed" (js/parseInt text-val 10))
+                      "rain_hour" (aset state "rainHour" (js/parseFloat text-val))
+                      "rainfall_24hr" (aset state "rain24hr" (js/parseFloat text-val))
+                      "cloud" (aset state "cloud" text-val)
+                      nil)))))))
+
+    (set! (.-closeTagHandler parser)
+          (fn [tag]
+            (when-not (aget state "done")
+              (let [tag-name (.-name tag)]
+                (cond
+                  (= tag-name "element")
+                  (aset state "currentElement" nil)
+
+                  (= tag-name "level")
+                  (aset state "inLevel" false)
+
+                  (= tag-name "station")
+                  (when (aget state "inStation")
+                    (reset! result {:station (aget state "stationName")
+                                    :observation_time (aget state "obsTime")
+                                    :temp_c (aget state "temp")
+                                    :feels_like_c (aget state "apparentTemp")
+                                    :humidity (aget state "humidity")
+                                    :wind_dir (aget state "windDir")
+                                    :wind_speed_kmh (aget state "windSpeed")
+                                    :gust_speed_kmh (aget state "gustSpeed")
+                                    :rain_last_hour_mm (aget state "rainHour")
+                                    :rain_24hr_mm (aget state "rain24hr")
+                                    :cloud (aget state "cloud")})
+                    (aset state "done" true)
+                    (aset state "inStation" false)))))))
+
+    {:parser parser
+     :get-result #(deref result)
+     :get-errors #(js->clj errors)
+     :is-done #(aget state "done")}))
+
+(defn- stream-parse-obs-xml
+  "Stream parse observation XML, extracting data for specific WMO ID.
+   Returns a promise that resolves with {:result {...} :errors [...]}."
+  [response target-wmo]
+  (let [reader (.getReader (.-body response))
+        decoder (js/TextDecoder.)
+        {:keys [parser get-result get-errors is-done]} (create-obs-sax-parser target-wmo)]
+
+    (js/Promise.
+     (fn [resolve _reject]
+       (letfn [(read-chunk []
+                 (-> (.read reader)
+                     (.then (fn [result]
+                              (if (or (.-done result) (is-done))
+                                (do
+                                  (.cancel reader)
+                                  (.close parser)
+                                  (resolve {:result (get-result) :errors (get-errors)}))
+                                (do
+                                  (.write parser (.decode decoder (.-value result)))
+                                  (if (is-done)
+                                    (do
+                                      (.cancel reader)
+                                      (.close parser)
+                                      (resolve {:result (get-result) :errors (get-errors)}))
+                                    (read-chunk))))))
+                     (.catch (fn [_]
+                               (.close parser)
+                               (resolve {:result (get-result) :errors (get-errors)})))))]
+         (read-chunk))))))
+
+(defn fetch-observation-by-wmo
+  "Fetch live observation for a specific WMO station ID.
+   Returns a promise that resolves with the observation result or nil."
+  [state-code wmo-id]
+  (if-let [feed-id (get state->obs-feed-id state-code)]
+    (-> (js/fetch (feed-url feed-id))
+        (.then (fn [response]
+                 (if (.-ok response)
+                   (-> (stream-parse-obs-xml response wmo-id)
                        (.then (fn [data] (:result data))))
                    (js/Promise.resolve nil))))
         (.catch (fn [_] (js/Promise.resolve nil))))

@@ -1,13 +1,14 @@
 # ClojureScript on Cloudflare Workers
 
-A technical demo exploring ClojureScript compilation to Cloudflare Workers. The domain application is incidental—the focus is on the mechanics of running ClojureScript in the Workers runtime.
+A technical demo exploring ClojureScript compilation to Cloudflare Workers. The domain application is an Australian weather API that combines place search with BOM forecasts and live observations.
 
 ## Key Technical Points
 
 - **Shadow-CLJS** with `:esm` target compiles to ES modules for Workers
 - **Reitit** for routing, with a thin Ring-style adapter (`worker.ring`)
+- **D1 Database** for place search with pre-computed weather station mappings
+- **Streaming SAX parsing** for efficient XML processing of BOM feeds
 - **Advanced compilation** keeps bundle size minimal
-- Ring-like request/response maps enable familiar Clojure idioms
 
 ## Ring Adapter
 
@@ -33,14 +34,66 @@ Routes with `:parameters` schemas get automatic validation:
 - Invalid params return 400 with `{:error "Invalid parameters" :in :query-params :issues [...]}`
 - Coerced params available under `:parameters` key in request
 
+## API
+
+### GET /api/forecast?q={query}
+
+Search for a place and get weather data. Returns the best match with 7-day forecast and live observations.
+
+```bash
+curl "http://localhost:8787/api/forecast?q=Melbourne"
+```
+
+**Response:**
+```json
+{
+  "query": "Melbourne",
+  "place": {
+    "name": "Melbourne",
+    "type": "city",
+    "state": "VIC",
+    "lat": -37.814,
+    "lon": 144.963
+  },
+  "observation": {
+    "station": "MELBOURNE (OLYMPIC PARK)",
+    "observation_time": "2026-01-01T12:00:00+11:00",
+    "temp_c": 18.5,
+    "feels_like_c": 14.9,
+    "humidity": 66,
+    "wind_dir": "SSW",
+    "wind_speed_kmh": 22,
+    "gust_speed_kmh": 32,
+    "rain_24hr_mm": 0
+  },
+  "forecast": {
+    "location": "Melbourne",
+    "aac": "VIC_PT042",
+    "periods": [
+      {
+        "start_time": "2026-01-01T10:00:00+11:00",
+        "end_time": "2026-01-02T00:00:00+11:00",
+        "forecast": "Mostly sunny.",
+        "icon": "sunny",
+        "min_temp": null,
+        "max_temp": 22,
+        "rain_chance": "0%"
+      }
+    ]
+  },
+  "other_matches": [...]
+}
+```
+
+**Icon values:** `sunny`, `clear`, `partly-cloudy`, `cloudy`, `hazy`, `light-rain`, `windy`, `fog`, `showers`, `rain`, `dusty`, `frost`, `snow`, `storm`, `light-showers`, `heavy-showers`, `cyclone`
+
 ## Project Structure
 
 ```
 src/main/worker/
-├── core.cljs   # Entry point, route definitions
-├── ring.cljs   # Ring adapter for Cloudflare
-├── bom.cljs    # Example: BOM weather data fetching
-└── views.cljs  # HTML templating
+├── core.cljs   # Entry point, route definitions, API handlers
+├── ring.cljs   # Ring adapter for Cloudflare (includes D1 bindings)
+└── bom.cljs    # BOM weather data fetching with streaming SAX parsing
 ```
 
 ## Development
@@ -70,31 +123,33 @@ npm run deploy    # Deploy to Cloudflare
 
 ## Places Database (D1)
 
-Australian places database for geocoding, sourced from OpenStreetMap. Each place has a pre-computed nearest BOM forecast location for instant weather lookups.
+Australian places database for geocoding, sourced from OpenStreetMap. Each place has pre-computed mappings to the nearest BOM forecast location and observation station for instant weather lookups.
 
 ### Data Sources
 
-The places database combines two datasets to create a searchable mapping between interesting places and weather forecast locations:
-
 **IDM00013.dbf** - BOM Forecast Locations (~684 locations)
-- DBF file from the Bureau of Meteorology containing official forecast locations across Australia
-- Includes location names and geographic coordinates
+- DBF file from the Bureau of Meteorology containing official forecast locations
 - Source: `ftp://ftp.bom.gov.au/anon/home/adfd/spatial/IDM00013.dbf`
 
-**australia.osm.pbf** - OpenStreetMap Places (~83,000 places)
-- PBF (Protocolbuffer Binary Format) file containing interesting places across Australia
-- Includes towns, cities, suburbs, landmarks, and points of interest that users might search for
-- Source: Geofabrik `https://download.geofabrik.de/australia-oceania/australia-latest.osm.pbf`
+**ID*60920.xml** - BOM Observation Stations (~600 stations)
+- Live weather observation feeds from weather stations across Australia
+- Source: `http://reg.bom.gov.au/fwo/IDV60920.xml` (one per state)
+
+**australia.osm.pbf** - OpenStreetMap Places (~100,000 places)
+- Cities, towns, suburbs, landmarks, and points of interest
+- Source: `https://download.geofabrik.de/australia-oceania/australia-latest.osm.pbf`
 
 **How They're Combined**
 
 The `scripts/process_pbf.clj` script:
-1. Extracts all interesting places from the OSM PBF file
+1. Fetches observation station metadata from all 8 state feeds
 2. Parses BOM forecast locations from the DBF file
-3. Pre-computes the nearest BOM forecast location for each OSM place using geographic distance calculations
-4. Generates `data/places.sql` with each place containing its matched BOM location and distance
+3. Computes nearest observation station for each forecast location
+4. Extracts interesting places from the OSM PBF file
+5. Computes nearest BOM forecast location for each OSM place
+6. Generates `data/places.sql` with all pre-computed mappings
 
-This pre-computation enables instant weather lookups—users can search for any place (e.g., "Bondi Beach") and immediately get the nearest BOM forecast location without runtime distance calculations. Average distance between a place and its forecast point is ~35 km.
+This enables instant weather lookups—search for any place and get both the 7-day forecast and live observations without runtime distance calculations.
 
 ### Quick Start
 
@@ -104,29 +159,26 @@ mkdir -p data/bom
 curl -o data/bom/IDM00013.dbf ftp://ftp.bom.gov.au/anon/home/adfd/spatial/IDM00013.dbf
 curl -L -o data/australia.osm.pbf https://download.geofabrik.de/australia-oceania/australia-latest.osm.pbf
 
-# 2. Process PBF to SQL with BOM location matching (requires: brew install osmium-tool)
-clojure -M scripts/process_pbf.clj scripts/config.edn
+# 2. Process PBF to SQL (requires: brew install osmium-tool)
+# This fetches observation stations, processes BOM locations, and extracts OSM places
+cd scripts && clj -M process_pbf.clj config.edn && cd ..
 
 # 3. Seed local D1 database
-wrangler d1 execute PLACES_DB --local --file data/places.sql
+wrangler d1 execute places-db --local --file data/places.sql
 
 # 4. Verify
-wrangler d1 execute PLACES_DB --local \
-  --command "SELECT name, state, bom_name, bom_distance_km FROM places WHERE name LIKE '%Melbourne%' LIMIT 5;"
+wrangler d1 execute places-db --local \
+  --command "SELECT name, state, bom_aac, obs_wmo FROM bom_locations WHERE name = 'Melbourne';"
 ```
 
 ### Database Stats
 
 | Metric | Value |
 |--------|-------|
-| Total places | ~83,000 |
-| BOM forecast locations | ~684 |
-| Average distance to forecast | ~35 km |
-| Database size | ~21 MB |
-
-### Script
-
-`scripts/process_pbf_osmium.clj` — Extracts places from OSM PBF, parses BOM forecast locations from DBF, and pre-computes nearest BOM location for each place.
+| Total places | ~102,000 |
+| BOM forecast locations | 684 |
+| Observation stations | ~600 |
+| Database size | ~25 MB |
 
 ### Remote Deployment
 
@@ -135,7 +187,7 @@ wrangler d1 execute PLACES_DB --local \
 wrangler d1 create places-db
 
 # Update wrangler.toml with the returned database_id, then:
-wrangler d1 execute PLACES_DB --remote --file data/places.sql
+wrangler d1 execute places-db --remote --file data/places.sql
 ```
 
 ### Data Attribution
