@@ -31,7 +31,7 @@
 (defn- search-places
   "Search for places matching query in D1 database.
    Returns top matches ordered by importance, including observation station info."
-  [db query]
+  [^js db query]
   (-> (.prepare db "SELECT p.name, p.type, p.state, p.lat, p.lon, p.bom_aac, p.importance,
                            b.obs_wmo, b.obs_name
                     FROM places p
@@ -41,7 +41,7 @@
                     LIMIT 10")
       (.bind (str "%" query "%"))
       (.all)
-      (.then (fn [result]
+      (.then (fn [^js result]
                (js->clj (.-results result) :keywordize-keys true)))))
 
 (defn- forecast-handler
@@ -49,7 +49,7 @@
    Query param 'q' is validated by Malli coercion.
    Uses D1 database to find matching places and their BOM forecast locations.
    Fetches both forecast and live observation data in parallel."
-  [{:keys [parameters env]}]
+  [{:keys [parameters ^js env]}]
   (let [{:keys [q]} (:query parameters)
         db (.-PLACES_DB env)]
     (-> (search-places db q)

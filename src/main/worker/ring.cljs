@@ -12,7 +12,7 @@
 
 (defn- parse-query-params
   "Parse URL search params into a Clojure map with keyword keys."
-  [url]
+  [^js url]
   (let [params (.-searchParams url)
         result (atom {})]
     (.forEach params (fn [v k] (swap! result assoc (keyword k) v)))
@@ -20,23 +20,23 @@
 
 (defn- parse-headers
   "Parse Headers object into a Clojure map with lowercase string keys."
-  [headers]
+  [^js headers]
   (let [result (atom {})]
     (.forEach headers (fn [v k] (swap! result assoc (str/lower-case k) v)))
     @result))
 
 (defn- parse-json-body
   "Parse request body as JSON. Returns Promise<map|nil>."
-  [request]
+  [^js request]
   (-> (.json request)
       (.then #(js->clj % :keywordize-keys true))
       (.catch (constantly nil))))
 
 (defn- parse-form-body
   "Parse request body as form data. Returns Promise<map|nil>."
-  [request]
+  [^js request]
   (-> (.formData request)
-      (.then (fn [form-data]
+      (.then (fn [^js form-data]
                (let [result (atom {})]
                  (.forEach form-data (fn [v k] (swap! result assoc (keyword k) v)))
                  @result)))
@@ -45,7 +45,7 @@
 (defn- parse-body
   "Parse request body based on content-type. Returns Promise<map|nil>.
    Only parses for methods that typically have bodies."
-  [request headers body-hint]
+  [^js request headers body-hint]
   (let [method (.-method request)
         content-type (get headers "content-type" "")]
     (if (and (#{"POST" "PUT" "PATCH"} method)
@@ -84,8 +84,8 @@
     :server-port    443}
 
    Body is only parsed if route data contains :body truthy value."
-  [request match]
-  (let [url (js/URL. (.-url request))
+  [^js request match]
+  (let [^js url (js/URL. (.-url request))
         headers (parse-headers (.-headers request))
         body-hint (get-in match [:data :body])
         query-str (.-search url)
@@ -225,7 +225,7 @@
 
      ((wrap-handler my-handler) request match)"
   [handler]
-  (fn [request match]
+  (fn [^js request match]
     (-> (->request-map request match)
         (.then (fn [request-map]
                  ;; Merge request into match for coerce! (it expects request fields at top level)
@@ -262,8 +262,8 @@
   (let [not-found (wrap-handler (or not-found-handler
                                     (constantly {:status 404
                                                  :body "Not Found"})))]
-    (fn [request env]
-      (let [url (js/URL. (.-url request))
+    (fn [^js request env]
+      (let [^js url (js/URL. (.-url request))
             path (.-pathname url)
             match (r/match-by-path router path)
             match-with-env (when match (assoc match :env env))]
