@@ -5,6 +5,7 @@ account_id = "35fae887cc4db5aef040a2e9cab81c04"
 
 [assets]
 directory = "./public"
+binding = "ASSETS"
 
 [observability]
 enabled = true
@@ -16,4 +17,4 @@ head_sampling_rate = 1  # 100% sampling for debugging, reduce in production
 [[d1_databases]]
 binding = "PLACES_DB"
 database_name = "places-db"
-database_id = "local"  # Placeholder for local development
+database_id = "50d583e7-060f-44eb-a7fc-1952b2a1310f"
