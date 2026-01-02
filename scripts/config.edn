@@ -1,4 +1,10 @@
 {:pbf-file "../data/australia.osm.pbf"
  :sql-file "../data/places.sql"
- :bom-dbf-file "../data/bom/IDM00013.dbf"
- :batch-size 100}
+ :batch-size 100
+ :local? true
+ :obs-stations-per-location 5
+ :obs-max-distance-km 100
+ ;; Remote data sources
+ :pbf-url "https://download.geofabrik.de/australia-oceania/australia-latest.osm.pbf"
+ :osm-state-url "https://download.geofabrik.de/australia-oceania/australia-updates/state.txt"
+ :bom-dbf-url "ftp://ftp.bom.gov.au/anon/home/adfd/spatial/IDM00013.dbf"}

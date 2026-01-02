@@ -58,33 +58,40 @@
           (when include-client-js?
             [:script {:src "/js/client.js" :defer true}])]])))
 
+(defn- detail-with-source
+  "Render a detail value with inline source attribution.
+   Only shows source if it differs from primary station."
+  [label value unit source primary-station]
+  [:div.detail
+   [:div.detail-label label]
+   [:div.detail-value (str value unit)]
+   (when (and source (not= (:station source) primary-station))
+     [:div.detail-source (str "from " (:station source))])])
+
 (defn current-conditions
-  "Render current observation data"
-  [{:keys [station temp_c feels_like_c humidity wind_dir wind_speed_kmh
-           gust_speed_kmh rain_24hr_mm]}]
-  [:div.current-conditions
-   [:h3 (str "Current Conditions" (when station (str " — " station)))]
-   [:div.current-temps
-    [:span.temp-main (if (some? temp_c) (str temp_c "°") "--")]
-    (when (some? feels_like_c)
-      [:span.feels-like (str "Feels like " feels_like_c "°")])]
-   [:div.current-details
-    (when (some? humidity)
-      [:div.detail
-       [:div.detail-label "Humidity"]
-       [:div.detail-value (str humidity "%")]])
-    (when (some? wind_speed_kmh)
-      [:div.detail
-       [:div.detail-label "Wind"]
-       [:div.detail-value (str (or wind_dir "") " " wind_speed_kmh " km/h")]])
-    (when (some? gust_speed_kmh)
-      [:div.detail
-       [:div.detail-label "Gusts"]
-       [:div.detail-value (str gust_speed_kmh " km/h")]])
-    (when (some? rain_24hr_mm)
-      [:div.detail
-       [:div.detail-label "Rain (24h)"]
-       [:div.detail-value (str rain_24hr_mm " mm")]])]])
+  "Render current observation data with source attribution.
+   Supports both old format (single station) and new format (multi-station with sources)."
+  [{:keys [station primary_station temp_c feels_like_c humidity wind_dir wind_speed_kmh
+           gust_speed_kmh rain_24hr_mm sources]}]
+  (let [main-station (or primary_station station)]
+    [:div.current-conditions
+     [:h3 (str "Current Conditions" (when main-station (str " — " main-station)))]
+     [:div.current-temps
+      [:span.temp-main (if (some? temp_c) (str temp_c "°") "--")]
+      (when (some? feels_like_c)
+        [:span.feels-like (str "Feels like " feels_like_c "°")])]
+     [:div.current-details
+      (when (some? humidity)
+        (detail-with-source "Humidity" humidity "%" (get sources :humidity) main-station))
+      (when (some? wind_speed_kmh)
+        (detail-with-source "Wind" (str (or wind_dir "") " " wind_speed_kmh) " km/h"
+                            (get sources :wind_speed_kmh) main-station))
+      (when (some? gust_speed_kmh)
+        (detail-with-source "Gusts" gust_speed_kmh " km/h"
+                            (get sources :gust_speed_kmh) main-station))
+      (when (some? rain_24hr_mm)
+        (detail-with-source "Rain (24h)" rain_24hr_mm " mm"
+                            (get sources :rain_24hr_mm) main-station))]]))
 
 (defn forecast-card
   "Render a single forecast period"

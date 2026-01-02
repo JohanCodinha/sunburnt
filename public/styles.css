@@ -193,6 +193,13 @@ h1 { color: #333; margin-bottom: 10px; font-size: 1.8em; text-align: center; }
   font-weight: 500;
 }
 
+.current-details .detail-source {
+  font-size: 0.7em;
+  color: #999;
+  margin-top: 3px;
+  font-style: italic;
+}
+
 .forecast-section h3 {
   color: #333;
   margin-bottom: 15px;

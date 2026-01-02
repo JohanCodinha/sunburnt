@@ -21,6 +21,7 @@
    "village"        50
    "national_park"  70
    "ski_resort"     65
+   "water_park"     50
    "beach"          40
    "lake"           40
    "mountain"       40
@@ -38,7 +39,7 @@
   ["place=city" "place=town" "place=village" "place=suburb"
    "place=hamlet" "place=locality" "place=neighbourhood"
    "natural=peak" "natural=beach" "natural=water"
-   "leisure=park" "leisure=nature_reserve"
+   "leisure=park" "leisure=nature_reserve" "leisure=water_park"
    "boundary=national_park"
    "tourism=attraction"
    "landuse=winter_sports"])
@@ -232,18 +233,20 @@
           (.parse input-stream handler))
     @stations))
 
-(defn find-nearest-observation-station
-  "Find the nearest observation station for given coordinates from a list of stations."
-  [stations lat lon]
-  (when (seq stations)
-    (reduce
-      (fn [best station]
-        (let [dist (equirectangular-distance lat lon (:lat station) (:lon station))]
-          (if (or (nil? best) (< dist (:distance best)))
-            (assoc station :distance dist)
-            best)))
-      nil
-      stations)))
+(defn find-nearest-observation-stations
+  "Find the N nearest observation stations for given coordinates.
+   Returns vector of stations sorted by distance, filtered by max-distance-km.
+   Each station has :distance and :rank added."
+  [stations lat lon n max-distance-km]
+  (->> stations
+       (map (fn [station]
+              (assoc station :distance
+                     (equirectangular-distance lat lon (:lat station) (:lon station)))))
+       (filter #(<= (:distance %) max-distance-km))
+       (sort-by :distance)
+       (take n)
+       (map-indexed (fn [idx station] (assoc station :rank (inc idx))))
+       vec))
 
 (defn dbf-row->location
   "Convert a DBF row to a location map"
@@ -296,6 +299,7 @@
       ;; Leisure
       (= leisure "park")           {:type "park"}
       (= leisure "nature_reserve") {:type "nature_reserve"}
+      (= leisure "water_park")     {:type "water_park"}
 
       ;; Other
       (= boundary "national_park") {:type "national_park"}
@@ -392,6 +396,15 @@
                  :values [[aac name lat lon state obs-wmo obs-name obs-distance-km]]}
                 {:inline true})))
 
+(defn bom-obs-station->sql
+  "Generate INSERT statement for a BOM observation station mapping"
+  [aac {:keys [wmo-id name lat lon distance rank]}]
+  (first
+    (sql/format {:insert-into :bom_obs_stations
+                 :columns [:aac :obs_wmo :obs_name :obs_lat :obs_lon :distance_km :rank]
+                 :values [[aac wmo-id name lat lon distance rank]]}
+                {:inline true})))
+
 (def bom-dbf-row->location
   "Transducer for transforming DBF rows into BOM location maps (precis=1 only)"
   (comp (take-while some?)
@@ -417,16 +430,19 @@
         (xf-add-slug seen-slugs)
         (partition-all batch-size)))
 
-(defn add-nearest-observation-station
-  "Add nearest observation station to a BOM location."
-  [obs-stations {:keys [lat lon] :as bom-loc}]
-  (let [nearest (find-nearest-observation-station obs-stations lat lon)]
-    (if nearest
-      (assoc bom-loc
-             :obs-wmo (:wmo-id nearest)
-             :obs-name (:name nearest)
-             :obs-distance-km (:distance nearest))
-      bom-loc)))
+(defn add-nearest-observation-stations
+  "Add nearest observation stations to a BOM location.
+   Returns {:bom-loc updated-loc :obs-stations [...]} where obs-stations
+   are the N nearest stations within max-distance-km."
+  [obs-stations n max-distance-km {:keys [aac lat lon] :as bom-loc}]
+  (let [nearest (find-nearest-observation-stations obs-stations lat lon n max-distance-km)]
+    {:bom-loc (if (seq nearest)
+                (assoc bom-loc
+                       :obs-wmo (:wmo-id (first nearest))
+                       :obs-name (:name (first nearest))
+                       :obs-distance-km (:distance (first nearest)))
+                bom-loc)
+     :obs-stations (mapv #(assoc % :aac aac) nearest)}))
 
 (defn metadata->sql
   "Generate SQL INSERT statements for data source metadata."
@@ -498,7 +514,8 @@
     (when (zero? (:exit result))
       (:out result))))
 
-(defn process! [{:keys [pbf-file pbf-url sql-file bom-dbf-url batch-size force? local? osm-state-url] :as config}]
+(defn process! [{:keys [pbf-file pbf-url sql-file bom-dbf-url batch-size force? local? osm-state-url
+                        obs-stations-per-location obs-max-distance-km] :as config}]
   (let [file (io/file pbf-file)]
     (when-not (.exists file)
       (io/make-parents file)
@@ -545,6 +562,13 @@
                                         (parse-observation-stations stream))))
                               doall
                               (mapcat deref)
+                              ;; Dedupe by WMO ID (stations appear in multiple state feeds)
+                              (reduce (fn [acc station]
+                                        (if (contains? acc (:wmo-id station))
+                                          acc
+                                          (assoc acc (:wmo-id station) station)))
+                                      {})
+                              vals
                               (into []))]
         (println "Streaming BOM forecast locations from" bom-dbf-url "...")
         (with-open [bom-stream (.openStream (java.net.URL. bom-dbf-url))
@@ -552,15 +576,23 @@
                     geojson-reader (io/reader (.getInputStream osmium-geojsonseq-export-process))
                     writer (io/writer sql-file)]
           (let [bom-locations-raw (into [] bom-dbf-row->location (repeatedly #(.nextRow bom-reader)))
-                _ (println "Computing nearest observation station for" (count bom-locations-raw) "BOM locations...")
-                bom-locations (mapv (partial add-nearest-observation-station obs-stations)
-                                    bom-locations-raw)]
+                n-stations (or obs-stations-per-location 5)
+                max-dist (or obs-max-distance-km 100)
+                _ (println "Computing nearest" n-stations "observation stations (within" max-dist "km) for" (count bom-locations-raw) "BOM locations...")
+                results (mapv (partial add-nearest-observation-stations obs-stations n-stations max-dist)
+                              bom-locations-raw)
+                bom-locations (mapv :bom-loc results)
+                all-obs-stations (mapcat :obs-stations results)]
             ;; schema.sql is in same directory as config file
             (let [config-dir (.getParent (io/file (first *command-line-args*)))]
               (.write writer (slurp (io/file config-dir "schema.sql"))))
             (.write writer (metadata->sql sources refreshed-at))
             (run! #(.write writer (str (bom-location->sql %) ";\n"))
                   bom-locations)
+            (println "Writing" (count all-obs-stations) "observation station mappings...")
+            (run! (fn [{:keys [aac] :as station}]
+                    (.write writer (str (bom-obs-station->sql aac station) ";\n")))
+                  all-obs-stations)
             (println "Processing OSM places...")
             (let [seen-slugs (atom #{})]
               (run! #(.write writer (str (batch->sql %) ";\n"))

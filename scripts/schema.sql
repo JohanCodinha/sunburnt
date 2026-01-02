@@ -26,6 +26,21 @@ CREATE TABLE IF NOT EXISTS bom_locations (
 
 CREATE INDEX IF NOT EXISTS idx_bom_state ON bom_locations(state);
 
+-- Multiple observation stations per BOM forecast location (for data merging)
+CREATE TABLE IF NOT EXISTS bom_obs_stations (
+  aac TEXT NOT NULL,           -- BOM forecast location AAC code
+  obs_wmo TEXT NOT NULL,       -- WMO station ID
+  obs_name TEXT NOT NULL,      -- Station name
+  obs_lat REAL NOT NULL,       -- Station latitude
+  obs_lon REAL NOT NULL,       -- Station longitude
+  distance_km REAL NOT NULL,   -- Distance from forecast location
+  rank INTEGER NOT NULL,       -- 1 = closest, 2 = second closest, etc.
+  PRIMARY KEY (aac, obs_wmo)
+);
+
+CREATE INDEX IF NOT EXISTS idx_obs_aac ON bom_obs_stations(aac);
+CREATE INDEX IF NOT EXISTS idx_obs_rank ON bom_obs_stations(aac, rank);
+
 -- Places with pre-computed nearest BOM forecast location
 CREATE TABLE IF NOT EXISTS places (
   id INTEGER PRIMARY KEY,

@@ -60,6 +60,19 @@
                (when result
                  (js->clj result :keywordize-keys true))))))
 
+(defn- find-obs-stations-for-aac
+  "Find observation stations for a BOM AAC code, ordered by rank (distance)."
+  [^js db aac]
+  (-> (.prepare db "SELECT obs_wmo, obs_name, obs_lat, obs_lon, distance_km, rank
+                    FROM bom_obs_stations
+                    WHERE aac = ?
+                    ORDER BY rank ASC
+                    LIMIT 5")
+      (.bind aac)
+      (.all)
+      (.then (fn [^js result]
+               (js->clj (.-results result) :keywordize-keys true)))))
+
 (defn- find-other-places-by-name
   "Find other places with the same name (for 'other matches')."
   [^js db name current-slug]
@@ -89,7 +102,7 @@
   "Returns forecast data for matching locations.
    Query param 'q' is validated by Malli coercion.
    Uses D1 database to find matching places and their BOM forecast locations.
-   Fetches both forecast and live observation data in parallel."
+   Fetches observations from multiple stations for better data coverage."
   [{:keys [parameters ^js env]}]
   (let [{:keys [q]} (:query parameters)
         db (.-PLACES_DB env)]
@@ -98,25 +111,24 @@
                  (if (seq places)
                    (let [best-match (first places)
                          state (:state best-match)
-                         ;; Fetch forecast and observation in parallel
                          forecast-promise (bom/fetch-forecast-by-aac state (:bom_aac best-match))
-                         obs-promise (if-let [wmo (:obs_wmo best-match)]
-                                       (bom/fetch-observation-by-wmo state wmo)
-                                       (js/Promise.resolve nil))]
-                     (-> (js/Promise.all #js [forecast-promise obs-promise])
+                         stations-promise (find-obs-stations-for-aac db (:bom_aac best-match))]
+                     (-> (js/Promise.all #js [forecast-promise stations-promise])
                          (.then (fn [results]
-                                  (let [[forecast observation] (js->clj results :keywordize-keys true)]
-                                    (ring/json-response
-                                     {:query q
-                                      :place {:name (:name best-match)
-                                              :type (:type best-match)
-                                              :state (:state best-match)
-                                              :lat (:lat best-match)
-                                              :lon (:lon best-match)}
-                                      :observation observation
-                                      :forecast forecast
-                                      :other_matches (mapv #(select-keys % [:name :type :state])
-                                                           (rest places))}))))))
+                                  (let [[forecast stations] (js->clj results :keywordize-keys true)]
+                                    (-> (bom/fetch-observations-multi state stations)
+                                        (.then (fn [observation]
+                                                 (ring/json-response
+                                                  {:query q
+                                                   :place {:name (:name best-match)
+                                                           :type (:type best-match)
+                                                           :state (:state best-match)
+                                                           :lat (:lat best-match)
+                                                           :lon (:lon best-match)}
+                                                   :observation observation
+                                                   :forecast forecast
+                                                   :other_matches (mapv #(select-keys % [:name :type :state])
+                                                                        (rest places))})))))))))
                    (ring/json-response {:query q
                                         :error "No matching places found"
                                         :places []})))))))
@@ -149,7 +161,8 @@
                   (mapv #(select-keys % [:name :slug :type :state]) places)))))))
 
 (defn- forecast-page-handler
-  "Renders the forecast page for a specific location by slug."
+  "Renders the forecast page for a specific location by slug.
+   Uses multi-station observation fetching for better data coverage."
   [{:keys [parameters ^js env]}]
   (let [{:keys [slug]} (:path parameters)
         db (.-PLACES_DB env)]
@@ -159,21 +172,23 @@
                    (ring/html-response (views/not-found-page slug) 404)
                    (let [state (:state place)
                          forecast-promise (bom/fetch-forecast-by-aac state (:bom_aac place))
-                         obs-promise (if-let [wmo (:obs_wmo place)]
-                                       (bom/fetch-observation-by-wmo state wmo)
-                                       (js/Promise.resolve nil))
+                         stations-promise (find-obs-stations-for-aac db (:bom_aac place))
                          others-promise (find-other-places-by-name db (:name place) slug)]
-                     (-> (js/Promise.all #js [forecast-promise obs-promise others-promise])
+                     ;; First get stations, then fetch observations from all of them
+                     (-> (js/Promise.all #js [forecast-promise stations-promise others-promise])
                          (.then (fn [results]
-                                  (let [[forecast observation other-matches] (js->clj results :keywordize-keys true)]
-                                    (ring/html-response
-                                     (views/forecast-page
-                                      {:place {:name (:name place)
-                                               :type (:type place)
-                                               :state (:state place)}
-                                       :observation observation
-                                       :forecast forecast
-                                       :other-matches other-matches})))))))))))))
+                                  (let [[forecast stations other-matches] (js->clj results :keywordize-keys true)]
+                                    ;; Now fetch multi-station observations
+                                    (-> (bom/fetch-observations-multi state stations)
+                                        (.then (fn [observation]
+                                                 (ring/html-response
+                                                  (views/forecast-page
+                                                   {:place {:name (:name place)
+                                                            :type (:type place)
+                                                            :state (:state place)}
+                                                    :observation observation
+                                                    :forecast forecast
+                                                    :other-matches other-matches}))))))))))))))))
 
 (def router
   (r/router
