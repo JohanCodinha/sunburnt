@@ -195,7 +195,7 @@
           ^js sw (.getSouthWest bounds)
           ^js ne (.getNorthEast bounds)
           bounds-str (str (.-lng sw) "," (.-lat sw) "," (.-lng ne) "," (.-lat ne))]
-      (-> (js/fetch (str "/api/stations/temps?bounds=" bounds-str))
+      (-> (js/fetch (str "/weather/api/stations/temps?bounds=" bounds-str))
           (.then (fn [r] (.json r)))
           (.then (fn [temps]
                    (let [^js source (.getSource map-obj "stations")
@@ -230,7 +230,7 @@
         ;; Load station data when map is ready
         (.on map-obj "load"
              (fn []
-               (-> (js/fetch "/api/stations/geojson")
+               (-> (js/fetch "/weather/api/stations/geojson")
                    (.then (fn [r] (.json r)))
                    (.then (fn [data]
                             ;; Add source
@@ -300,7 +300,7 @@
                                          (.setHTML (str "<div class=\"station-popup\">"
                                                         "<h4>" (.-name props) "</h4>"
                                                         "<div class=\"state\">" (.-state props) "</div>"
-                                                        "<a href=\"/station/" (.-wmo props) "\" class=\"view-link\">View station →</a>"
+                                                        "<a href=\"/weather/station/" (.-wmo props) "\" class=\"view-link\">View station →</a>"
                                                         "</div>"))
                                          (.addTo map-obj)))))
 
@@ -389,21 +389,21 @@
   (init-autocomplete
    {:input-id "search"
     :suggestions-id "suggestions"
-    :api-endpoint "/api/places"
+    :api-endpoint "/weather/api/places"
     :render-fn render-place
     :id-key :slug
     :navigate-fn (fn [{:keys [slug]}]
-                   (set! (.-location js/window) (str "/forecast/" slug)))})
+                   (set! (.-location js/window) (str "/weather/forecast/" slug)))})
 
   ;; Station search autocomplete (stations page)
   (init-autocomplete
    {:input-id "station-search"
     :suggestions-id "station-suggestions"
-    :api-endpoint "/api/stations"
+    :api-endpoint "/weather/api/stations"
     :render-fn render-station
     :id-key :obs_wmo
     :navigate-fn (fn [{:keys [obs_wmo]}]
-                   (set! (.-location js/window) (str "/station/" obs_wmo)))})
+                   (set! (.-location js/window) (str "/weather/station/" obs_wmo)))})
 
   ;; Capitals weather map (home page)
   (init-capitals-map)

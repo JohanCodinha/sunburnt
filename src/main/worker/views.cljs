@@ -211,11 +211,11 @@
           [:meta {:charset "UTF-8"}]
           [:meta {:name "viewport" :content "width=device-width, initial-scale=1.0"}]
           [:title title]
-          [:link {:rel "stylesheet" :href "/styles.css"}]]
+          [:link {:rel "stylesheet" :href "/weather/styles.css"}]]
          [:body
           [:div.container body]
           (when include-client-js?
-            [:script {:src "/js/client.js" :defer true}])]])))
+            [:script {:src "/weather/js/client.js" :defer true}])]])))
 
 (defn- detail-with-source
   "Render a detail value with inline source attribution.
@@ -284,7 +284,7 @@
     [:div.other-matches
      [:h4 "Other matches:"]
      (for [{:keys [name slug state]} matches]
-       [:a {:href (str "/forecast/" slug)} (str name ", " state)])]))
+       [:a {:href (str "/weather/forecast/" slug)} (str name ", " state)])]))
 
 (defn home-page
   "Home page with search autocomplete and capitals weather map"
@@ -296,7 +296,7 @@
           [:meta {:charset "UTF-8"}]
           [:meta {:name "viewport" :content "width=device-width, initial-scale=1.0"}]
           [:title "Australian Weather Forecast"]
-          [:link {:rel "stylesheet" :href "/styles.css"}]
+          [:link {:rel "stylesheet" :href "/weather/styles.css"}]
           [:link {:rel "stylesheet" :href "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"}]
           [:script {:src "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"}]]
          [:body
@@ -312,9 +312,9 @@
            [:div.examples
             "Try: "
             (for [{:keys [name slug]} examples]
-              [:a {:href (str "/forecast/" slug)} name])]
+              [:a {:href (str "/weather/forecast/" slug)} name])]
            [:div.stations-link
-            [:a {:href "/stations"} "Browse all weather stations →"]]
+            [:a {:href "/weather/stations"} "Browse all weather stations →"]]
            [:div.tech-stack
             "Built with ClojureScript + shadow-cljs + Reitit + Cloudflare Workers"
             [:br]
@@ -322,14 +322,14 @@
           ;; Use :innerHTML to bypass HTML escaping for JSON data
           [:script {:type "application/json" :id "capitals-data"
                     :innerHTML (js/JSON.stringify (clj->js capitals-weather))}]
-          [:script {:src "/js/client.js" :defer true}]]])))
+          [:script {:src "/weather/js/client.js" :defer true}]]])))
 
 (defn forecast-page
   "Forecast page for a specific location"
   [{:keys [place observation forecast other-matches]}]
   (layout
    {:title (str (:name place) " Weather Forecast")}
-   [:a.back-link {:href "/"} "← Back to search"]
+   [:a.back-link {:href "/weather"} "← Back to search"]
    [:div.location-header
     [:h2 (:name place)]
     [:div.state (str (when (:type place) (str (:type place) ", ")) (:state place))]]
@@ -351,7 +351,7 @@
    [:div.not-found
     [:h2 "Location Not Found"]
     [:p (str "We couldn't find a location matching \"" slug "\".")]
-    [:a.back-link {:href "/"} "← Back to search"]]))
+    [:a.back-link {:href "/weather"} "← Back to search"]]))
 
 (defn stations-list-page
   "Stations list page with map and search autocomplete"
@@ -363,12 +363,12 @@
           [:meta {:charset "UTF-8"}]
           [:meta {:name "viewport" :content "width=device-width, initial-scale=1.0"}]
           [:title "Weather Stations"]
-          [:link {:rel "stylesheet" :href "/styles.css"}]
+          [:link {:rel "stylesheet" :href "/weather/styles.css"}]
           [:link {:rel "stylesheet" :href "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"}]
           [:script {:src "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"}]]
          [:body
           [:div.container
-           [:a.back-link {:href "/"} "← Back to search"]
+           [:a.back-link {:href "/weather"} "← Back to search"]
            [:h1 "Weather Stations"]
            [:p.subtitle "Click a station on the map or search below"]
            [:div#map.stations-map]
@@ -381,7 +381,7 @@
             "Built with ClojureScript + shadow-cljs + Reitit + Cloudflare Workers"
             [:br]
             "Data from Bureau of Meteorology"]]
-          [:script {:src "/js/client.js" :defer true}]]])))
+          [:script {:src "/weather/js/client.js" :defer true}]]])))
 
 (defn- station-conditions
   "Render current observation data for a single station"
@@ -417,7 +417,7 @@
   [{:keys [station observation]}]
   (layout
    {:title (str (:obs_name station) " Weather Station")}
-   [:a.back-link {:href "/stations"} "← Back to stations"]
+   [:a.back-link {:href "/weather/stations"} "← Back to stations"]
    [:div.location-header
     [:h2 (:obs_name station)]
     [:div.state (:state station)]
@@ -437,5 +437,5 @@
   [message]
   (layout
    {:title "Error"}
-   [:a.back-link {:href "/"} "← Back to search"]
+   [:a.back-link {:href "/weather"} "← Back to search"]
    [:div.error message]))

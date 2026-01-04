@@ -13,7 +13,7 @@
   :client
   {:target :browser
    :output-dir "public/js"
-   :asset-path "/js"
+   :asset-path "/weather/js"
    :modules {:client {:init-fn worker.client/init}}
    :devtools {:enabled false}
    :compiler-options {:optimizations :advanced}}}}
