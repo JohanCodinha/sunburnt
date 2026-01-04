@@ -3,6 +3,9 @@ main = "./out/main.js"
 compatibility_date = "2024-01-01"
 account_id = "35fae887cc4db5aef040a2e9cab81c04"
 
+# No route - accessed via tools-gateway service binding
+workers_dev = true
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
