@@ -1,6 +1,7 @@
 {:source-paths ["src/main"]
  :dependencies [[metosin/reitit-core "0.7.2"]
-                [metosin/reitit-malli "0.7.2"]]
+                [metosin/reitit-malli "0.7.2"]
+                [no.cjohansen/replicant "2025.12.1"]]
  :builds
  {:worker
   {:target :esm
